@@ -3701,6 +3701,17 @@ refresh based on overlay type."
               ;; re-encode, inside the refresh sync block, image-id/pid
               ;; ignored by `kitty-graphics--sixel-place').
               (cond
+               ((and (not (eq kitty-graphics--active-backend 'sixel))
+                     (eq (kitty-graphics--effective-placement-mode) 'placeholder))
+                ;; Placeholder cells are text too: whatever Emacs redraws
+                ;; over them (the region, hl-line, the full redraw after a
+                ;; resize) wipes the image, so re-emit them like Sixel.
+                ;; Unlike Sixel this is cheap: no image data is resent.
+                (kitty-graphics--log "refresh-ov: pid=%d placeholder re-emit at row=%d col=%d"
+                                pid new-row new-col)
+                (funcall (kitty-graphics--backend-fn 'place)
+                         ov id (or (plist-get placement-data :pid) pid)
+                         cols rows new-row new-col))
                ((not (eq kitty-graphics--active-backend 'sixel))
                 (kitty-graphics--log "refresh-ov: pid=%d unchanged at row=%d col=%d"
                                 pid new-row new-col))
@@ -4210,6 +4221,18 @@ that bailed early leaves the old signatures so the next
    (lambda (w) (set-window-parameter w 'kitty-graphics-sig nil))
    nil t))
 
+(defun kitty-graphics--on-mouse-movement (&rest _)
+  "Re-place images after xterm mouse motion repaints highlighting.
+Hovering over an image whose underlying text has a `mouse-face' (an
+org link, say) makes Emacs repaint that text with the highlight, and
+moving off it repaints it again.  In placeholder mode both wipe the
+image's cells, and neither runs a command, so `post-command-hook'
+never schedules the refresh that re-emits them."
+  (when (and (eq kitty-graphics--active-backend 'kitty)
+             (eq (kitty-graphics--effective-placement-mode) 'placeholder)
+             (kitty-graphics--any-visible-overlays-p))
+    (kitty-graphics--schedule-refresh)))
+
 (defun kitty-graphics--on-redisplay ()
   "Post-command hook to schedule image refresh.
 Early-exits when no visible window has any kitty-graphics overlays so
@@ -4223,6 +4246,11 @@ refresh schedule nothing at all."
              (not (current-message))
              (not (and kitty-graphics-skip-clean-refresh
                        (not kitty-graphics--force-redisplay)
+                       ;; Redraws that wipe placeholder cells (region,
+                       ;; hl-line) leave the window signature unchanged.
+                       (not (and (eq kitty-graphics--active-backend 'kitty)
+                                 (eq (kitty-graphics--effective-placement-mode)
+                                     'placeholder)))
                        (kitty-graphics--windows-clean-p))))
     (kitty-graphics--schedule-refresh)))
 
@@ -5199,6 +5227,9 @@ stored images need no explicit deletion - they vanish with the terminal."
   (add-hook 'window-size-change-functions #'kitty-graphics--on-window-change)
   (add-hook 'window-buffer-change-functions #'kitty-graphics--on-buffer-change)
   (add-hook 'post-command-hook #'kitty-graphics--on-redisplay)
+  ;; Hover highlighting repaints without running a command.
+  (advice-add 'xterm-mouse--handle-mouse-movement :after
+              #'kitty-graphics--on-mouse-movement)
   (add-hook 'kill-buffer-hook #'kitty-graphics--kill-buffer-hook)
   (add-hook 'server-after-make-frame-hook #'kitty-graphics--on-new-frame)
   (add-hook 'after-make-frame-functions #'kitty-graphics--on-new-frame)
@@ -5210,6 +5241,8 @@ stored images need no explicit deletion - they vanish with the terminal."
   (remove-hook 'window-size-change-functions #'kitty-graphics--on-window-change)
   (remove-hook 'window-buffer-change-functions #'kitty-graphics--on-buffer-change)
   (remove-hook 'post-command-hook #'kitty-graphics--on-redisplay)
+  (advice-remove 'xterm-mouse--handle-mouse-movement
+                 #'kitty-graphics--on-mouse-movement)
   (remove-hook 'kill-buffer-hook #'kitty-graphics--kill-buffer-hook)
   (remove-hook 'server-after-make-frame-hook #'kitty-graphics--on-new-frame)
   (remove-hook 'after-make-frame-functions #'kitty-graphics--on-new-frame)
