@@ -5175,7 +5175,10 @@ Install `img2sixel' (libsixel; strongly recommended) or
 ImageMagick (`magick'/`convert').  Without an encoder, no images
 will render even though detection reports Sixel as supported."
                :warning))
-            (kitty-graphics--log "mode: enabled (backend=%s cell=%dx%d text-sizing=%s)"
+            ;; %s, not %d: the cell size is only queried on the idle timer
+            ;; above, so it is still nil here and %d would signal, breaking
+            ;; the first client frame whenever debug logging is on.
+            (kitty-graphics--log "mode: enabled (backend=%s cell=%sx%s text-sizing=%s)"
                              kitty-graphics--active-backend
                              kitty-graphics--cell-pixel-width kitty-graphics--cell-pixel-height
                              kitty-graphics--text-sizing-support)
