@@ -1727,6 +1727,12 @@ re-placement."
     (_
      (kitty-graphics--place-image image-id placement-id cols rows term-row term-col))))
 
+(defvar kitty-graphics--placeholder-clip-row nil
+  "Last terminal row (1-based) of the window being refreshed, or nil.
+Placeholder cells are written straight to the terminal, so rows of a
+partly visible image below this row would land on the mode line and
+echo area.  Bound per window by `kitty-graphics--refresh'.")
+
 (defun kitty-graphics--place-placeholder (ov pid image-id cols rows term-row term-col)
   "Render IMAGE-ID at (TERM-ROW, TERM-COL) via Unicode placeholder cells.
 Registers (or re-registers, when the dimensions changed) the image's
@@ -1744,12 +1750,19 @@ next erase."
                       cols rows max)
       (setq cols (min cols max)
             rows (min rows max))))
+  ;; The virtual placement keeps the full size so the rows that do fit
+  ;; show the top of the image rather than a squashed whole.
   (kitty-graphics--register-virtual-placement image-id cols rows)
-  (when (overlayp ov)
-    (kitty-graphics--erase-placeholder-area ov pid))
-  (kitty-graphics--emit-placeholder-cells image-id cols rows term-row term-col)
-  (when (overlayp ov)
-    (kitty-graphics--record-placeholder-area ov pid term-row term-col cols rows)))
+  (let ((vis-rows (if kitty-graphics--placeholder-clip-row
+                      (min rows (max 0 (- kitty-graphics--placeholder-clip-row
+                                          term-row -1)))
+                    rows)))
+    (when (overlayp ov)
+      (kitty-graphics--erase-placeholder-area ov pid))
+    (when (> vis-rows 0)
+      (kitty-graphics--emit-placeholder-cells image-id cols vis-rows term-row term-col))
+    (when (overlayp ov)
+      (kitty-graphics--record-placeholder-area ov pid term-row term-col cols vis-rows))))
 
 (defun kitty-graphics--record-placeholder-area (ov pid row col cols rows)
   "Remember on OV that PID was emitted at (ROW, COL) sized COLS x ROWS.
@@ -1775,7 +1788,11 @@ PID's entry from the alist after erasing."
                        pid row col cs rs)
       (let ((parts (list "\e7"))
             (blank (make-string cs ?\s)))
-        (dotimes (y rs)
+        ;; After the window shrinks, rows past its new bottom belong to
+        ;; the mode line or echo area: leave them to Emacs.
+        (dotimes (y (if kitty-graphics--placeholder-clip-row
+                        (min rs (max 0 (- kitty-graphics--placeholder-clip-row row -1)))
+                      rs))
           (push (format "\e[%d;%dH%s" (+ row y) col blank) parts))
         (push "\e8" parts)
         (kitty-graphics--terminal-send (mapconcat #'identity (nreverse parts) ""))))
@@ -3355,7 +3372,18 @@ range, inside a folded region, or not visible on screen."
              (win-pos (posn-at-point pos win)))
         (when win-pos
           (let* ((col-row (posn-col-row win-pos))
-                 (row (cdr col-row))
+                 ;; When a multi-row reservation (a display string with
+                 ;; newlines) reaches the bottom of the window, Emacs
+                 ;; reports the window's last row for POS instead of the
+                 ;; row the string starts on, which put images below their
+                 ;; text and over the mode line.  Counting screen lines from
+                 ;; `window-start' gives the start row either way.
+                 (row (if (and (> (or (overlay-get ov 'kitty-graphics-rows) 1) 1)
+                               (with-current-buffer buf
+                                 (save-excursion (goto-char pos) (bolp))))
+                          (with-current-buffer buf
+                            (count-screen-lines (window-start win) pos nil win))
+                        (cdr col-row)))
                  (posn-col (car col-row))
                  (posn-xy (posn-x-y win-pos))
                  ;; `posn-col-row' is derived from pixel coordinates and can
@@ -3582,7 +3610,11 @@ several daemon clients on different ttys render correctly at once."
                                   (kitty-graphics--log "refresh: pruned %d dead overlays from %s"
                                                   removed (buffer-name)))))
                             (let* ((edges (window-edges win))
-                                   (win-bottom (nth 3 edges)))
+                                   (win-bottom (nth 3 edges))
+                                   ;; The text area's exclusive 0-based bottom
+                                   ;; is its last row in 1-based terminal terms.
+                                   (kitty-graphics--placeholder-clip-row
+                                    (nth 3 (window-body-edges win))))
                               (kitty-graphics--log "refresh: win=%s buf=%s overlays=%d bottom=%d term=%s"
                                               win (buffer-name) (length kitty-graphics--overlays)
                                               win-bottom term)
