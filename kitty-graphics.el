@@ -4617,6 +4617,26 @@ other daemon clients."
   (remhash file kitty-graphics--image-cache)
   (setq kitty-graphics--cache-lru (delete file kitty-graphics--cache-lru)))
 
+(defun kitty-graphics--cache-key (file cols rows)
+  "Return the image-cache key for FILE shown at COLS x ROWS cells.
+A placeholder-mode image is drawn through one virtual placement whose
+size is fixed per image ID, so the same file at two sizes (inline in
+org and in image-mode, say) needs an ID per size: sharing one made each
+display re-register its size over the other's, cropping or enlarging
+the image.  Direct placements carry their own size and share one ID."
+  (if (and (eq kitty-graphics--active-backend 'kitty)
+           (eq (kitty-graphics--effective-placement-mode) 'placeholder))
+      (format "%s\0%dx%d" file cols rows)
+    file))
+
+(defun kitty-graphics--cache-remove-file (file)
+  "Remove every image-cache entry for FILE, at any size."
+  (let ((prefix (concat file "\0")))
+    (maphash (lambda (key _id)
+               (when (or (equal key file) (string-prefix-p prefix key))
+                 (kitty-graphics--cache-remove key)))
+             (copy-hash-table kitty-graphics--image-cache))))
+
 (defun kitty-graphics--make-blank-display (cols rows)
   "Create a blank display string of COLS terminal columns x ROWS lines.
 Each line is propertized with face `default' to prevent org-link
@@ -4825,7 +4845,7 @@ matching the synchronous path's no-overlay-on-failure behaviour."
      (if (not png)
          (progn
            (kitty-graphics--log "async-prepare: conversion failed, dropping %s" file)
-           (kitty-graphics--cache-remove file)
+           (kitty-graphics--cache-remove-file file)
            (dolist (buf (buffer-list))
              (with-current-buffer buf
                (dolist (ov (copy-sequence kitty-graphics--overlays))
@@ -4845,8 +4865,6 @@ BEG/END span the overlay region.  MAX-COLS/MAX-ROWS limit size."
   (let* ((max-c (or max-cols kitty-graphics-max-width))
          (max-r (or max-rows kitty-graphics-max-height))
          (abs-file (expand-file-name file))
-         (cached-id (kitty-graphics--cache-get abs-file))
-         (image-id (or cached-id (kitty-graphics--alloc-id)))
          ;; Always compute dimensions fresh — they depend on max-cols/rows
          ;; which vary by display context (org inline vs image-mode vs dired).
          (dims (let ((px (kitty-graphics--image-pixel-size abs-file)))
@@ -4856,6 +4874,9 @@ BEG/END span the overlay region.  MAX-COLS/MAX-ROWS limit size."
                    (cons (min 40 max-c) (min 15 max-r)))))
          (cols (car dims))
          (rows (cdr dims))
+         (cache-key (kitty-graphics--cache-key abs-file cols rows))
+         (cached-id (kitty-graphics--cache-get cache-key))
+         (image-id (or cached-id (kitty-graphics--alloc-id)))
          (start (or beg (point)))
          (stop (or end (point))))
     (kitty-graphics--log "display-image: file=%s id=%d cols=%d rows=%d beg=%s end=%s cached=%s"
@@ -4864,12 +4885,12 @@ BEG/END span the overlay region.  MAX-COLS/MAX-ROWS limit size."
     (unless cached-id
       (if (kitty-graphics--async-prepare-p abs-file)
           (progn
-            (kitty-graphics--cache-put abs-file image-id)
+            (kitty-graphics--cache-put cache-key image-id)
             (kitty-graphics--start-async-prepare abs-file))
         (when (funcall (kitty-graphics--backend-fn 'prepare) abs-file image-id)
-          (kitty-graphics--cache-put abs-file image-id))))
+          (kitty-graphics--cache-put cache-key image-id))))
     ;; Create overlay with blank space (even for cached images, dims are fresh)
-    (when (or cached-id (gethash abs-file kitty-graphics--image-cache))
+    (when (or cached-id (gethash cache-key kitty-graphics--image-cache))
       (let ((ov (kitty-graphics--make-overlay start stop image-id cols rows abs-file)))
         ;; Schedule initial render (force-redisplay: new overlay's display
         ;; property must be processed before `posn-at-point' measurement).
@@ -4914,17 +4935,18 @@ The buffer should be writable (caller handles `inhibit-read-only')."
     (let* ((img-start (point))
            (_ (insert "\n"))
            ;; Ensure image is transmitted (cache stores only the ID)
-           (cached-id (kitty-graphics--cache-get abs-file))
+           (cache-key (kitty-graphics--cache-key abs-file img-cols img-rows))
+           (cached-id (kitty-graphics--cache-get cache-key))
            (image-id (or cached-id (kitty-graphics--alloc-id))))
       (unless cached-id
         (if (kitty-graphics--async-prepare-p abs-file)
             (progn
-              (kitty-graphics--cache-put abs-file image-id)
+              (kitty-graphics--cache-put cache-key image-id)
               (kitty-graphics--start-async-prepare abs-file))
           (when (funcall (kitty-graphics--backend-fn 'prepare) abs-file image-id)
-            (kitty-graphics--cache-put abs-file image-id))))
+            (kitty-graphics--cache-put cache-key image-id))))
       ;; Create overlay at the scaled dimensions.
-      (when (or cached-id (gethash abs-file kitty-graphics--image-cache))
+      (when (or cached-id (gethash cache-key kitty-graphics--image-cache))
         (kitty-graphics--make-overlay img-start (point) image-id
                                   img-cols img-rows abs-file reuse-pid)
         (kitty-graphics--schedule-refresh t)))))
